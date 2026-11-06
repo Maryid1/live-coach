@@ -1,0 +1,28 @@
+services:
+  web:
+    build: .
+    image: live-coach:test-v1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      AI_PROVIDER: ${AI_PROVIDER:-bailian}
+      ZSWING_API_KEY: ${ZSWING_API_KEY:-}
+      ZSWING_MODEL: ${ZSWING_MODEL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
+      APP_USER: ${APP_USER:?Set APP_USER in .env}
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in .env}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-}
+      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-}
+    mem_limit: 256m
+    pids_limit: 64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
