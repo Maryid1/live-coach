@@ -27,7 +27,8 @@ try {
   }
   await page.getByRole('button', { name: '收藏当前稿件', exact: true }).click();
   await page.reload({ waitUntil: 'networkidle' });
-  await page.getByRole('button', { name: '暖场话术库', exact: true }).click();
+  await page.getByRole('button', { name: '口播稿库', exact: true }).click();
+  await page.getByRole('button', { name: '收藏片段', exact: true }).click();
   await page.getByRole('heading', { name: '我的稿件收藏 · 1/20' }).waitFor();
   await page.getByRole('button', { name: '载入提词区', exact: true }).click();
   await page.getByRole('button', { name: '新手一周练几次？', exact: true }).click();
@@ -37,7 +38,8 @@ try {
   await page.getByRole('button', { name: '膝盖疼还能练吗？', exact: true }).click();
   await page.getByRole('button', { name: '获取 3 种内置答法' }).click();
   await page.locator('.prompter').getByText(/医疗专业人员评估/).waitFor();
-  await page.getByRole('button', { name: '暖场话术库', exact: true }).click();
+  await page.getByRole('button', { name: '口播稿库', exact: true }).click();
+  await page.getByRole('button', { name: '暖场话术', exact: true }).click();
   await page.getByRole('button', { name: /认识工作室/ }).click();
   await page.getByRole('button', { name: '放进提词区' }).click();
   await page.locator('.prompter').getByText(/选择一家工作室/).waitFor();
@@ -77,7 +79,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: 'outputs/mobile.png', fullPage: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-  for (const name of ['暖场话术库', '平台与风险', '工作室设置', '直播工作台']) {
+  for (const name of ['口播稿库', '平台与风险', '工作室设置', '直播工作台']) {
     await page.getByRole('button', { name, exact: true }).click();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `Mobile overflow on ${name}`);
   }
@@ -90,7 +92,8 @@ try {
   await page.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { value: false }));
   await page.reload({ waitUntil: 'networkidle' });
   assert.equal(await page.getByRole('button', { name: '点击说问题', exact: true }).isDisabled(), true);
-  await page.getByRole('button', { name: '暖场话术库', exact: true }).click();
+  await page.getByRole('button', { name: '口播稿库', exact: true }).click();
+  await page.getByRole('button', { name: '暖场话术', exact: true }).click();
   await page.getByLabel('自定义暖场话题', { exact: true }).fill('健身前的准备');
   await page.getByRole('button', { name: '用这个话题准备 AI 暖场' }).click();
   assert.match(await page.getByLabel('观众的问题').inputValue(), /健身前的准备/);

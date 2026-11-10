@@ -5,6 +5,6 @@ function run(command, args) { const r = spawnSync(command, args, { stdio: 'inher
 run(process.execPath, ['node_modules/vite/bin/vite.js', 'build', '--config', 'selfhost/vite.config.mjs']);
 const out = 'outputs/selfhost';
 mkdirSync(out, { recursive: true });
-for (const name of ['server.mjs', 'assist.mjs', 'Dockerfile', 'compose.yaml', '.env.example', '.dockerignore', 'README.md', 'UPDATE-v2.md', 'UPDATE-v3.md', 'UPDATE-v4.md']) copyFileSync(`selfhost/${name}`, `${out}/${name}`);
+for (const name of ['server.mjs', 'scripts-store.mjs', 'assist.mjs', 'Dockerfile', 'compose.yaml', '.env.example', '.dockerignore', 'README.md', 'UPDATE-v2.md', 'UPDATE-v3.md', 'UPDATE-v4.md', 'UPDATE-v5.md']) copyFileSync(`selfhost/${name}`, `${out}/${name}`);
 run('tar', ['-czf', 'outputs/live-coach-selfhost.tar.gz', '-C', out, '.']);
 console.log(path.resolve('outputs/live-coach-selfhost.tar.gz'));

@@ -53,3 +53,6 @@ live-coach-backup*/
 
 # OS metadata
 .DS_Store
+/data/
+/selfhost/data/
+live-coach-scripts-*.json

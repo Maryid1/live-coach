@@ -6,6 +6,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     environment:
+      DATA_DIR: /app/data
       AI_PROVIDER: ${AI_PROVIDER:-bailian}
       ZSWING_API_KEY: ${ZSWING_API_KEY:-}
       ZSWING_MODEL: ${ZSWING_MODEL:-}
@@ -16,6 +17,8 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-}
       DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-}
+    volumes:
+      - script-data:/app/data
     mem_limit: 256m
     pids_limit: 64
     read_only: true
@@ -26,3 +29,5 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+volumes:
+  script-data:

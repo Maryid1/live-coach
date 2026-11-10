@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { configuration, validateInput, assist } from './assist.mjs';
+import { createScriptsStore } from './scripts-store.mjs';
+const scriptsStore = createScriptsStore(process.env.DATA_DIR);
 let activeRequests = 0;
 const user = process.env.APP_USER, password = process.env.APP_PASSWORD;
 if (!user || user.includes(':') || !password || password.length < 16) {
@@ -26,6 +28,21 @@ const server = http.createServer(async (req, res) => {
   }
   try {
     const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    if (pathname === '/api/scripts') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      try {
+        if (req.method === 'GET') { res.end(JSON.stringify({ scripts: await scriptsStore.read() })); return; }
+        if (!['POST', 'PUT', 'DELETE'].includes(req.method)) { res.writeHead(405); res.end('{}'); return; }
+        if (![ `http://${req.headers.host}`, `https://${req.headers.host}` ].includes(req.headers.origin)) { res.writeHead(403); res.end(JSON.stringify({ error: '请求来源不允许。' })); return; }
+        if (!req.headers['content-type']?.includes('application/json')) { res.writeHead(415); res.end('{}'); return; }
+        const chunks = []; let size = 0;
+        for await (const chunk of req) { size += chunk.length; if (size > 220000) { res.writeHead(413); res.end(JSON.stringify({ error: '稿件过大。' })); return; } chunks.push(chunk); }
+        let body;
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!body || typeof body !== 'object') throw new Error(); } catch { res.writeHead(400); res.end(JSON.stringify({ error: '请求格式错误。' })); return; }
+        res.end(JSON.stringify({ scripts: await scriptsStore.mutate(req.method, body) }));
+      } catch (e) { res.writeHead(e.status || 503); res.end(JSON.stringify({ error: e.status ? e.message : '稿件存储无法读写，请检查数据目录权限；未覆盖当前编辑内容。' })); }
+      return;
+    }
     if (pathname === '/api/assist') {
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       const config = configuration();
