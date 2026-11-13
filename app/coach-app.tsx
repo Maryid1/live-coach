@@ -3,11 +3,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import ScriptLibrary from './script-library';
+import VoiceHelp from './voice-help';
+import VoiceConfirm from './voice-confirm';
+import { RealtimeSpeech } from './realtime-speech';
 import { Activity, ArrowRight, AudioLines, BookOpen, Check, CheckCheck, ChevronRight, CircleHelp, Clipboard, Clock3, Expand, FileText, Globe2, LayoutDashboard, Mic, Pause, Play, Plus, Radio, RefreshCw, Settings2, ShieldCheck, Sparkles, Square, Volume2, X } from 'lucide-react';
 import { checkItems, emptyStudio, offlineAnswer, platforms, quickQuestions, reminders, safeUrl, scanRisk, topics, warmup, type Platform, type Result, type Studio } from '../lib/coach';
 
 type Tab = 'desk' | 'scripts' | 'rules' | 'settings';
-type Speech = { lang: string; continuous: boolean; interimResults: boolean; start: () => void; stop: () => void; abort: () => void; onresult: ((event: { results: { [index: number]: { [index: number]: { transcript: string } } } }) => void) | null; onerror: ((event: { error: string }) => void) | null; onend: (() => void) | null };
 type Saved = { studio: Studio; selected: string[]; custom: Platform[]; words: string; minutes: number };
 const storageKey = 'zaichang-settings-v1';
 const initial = offlineAnswer(quickQuestions[0], emptyStudio);
@@ -64,7 +66,14 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
   const [consent, setConsent] = useState(false);
   const [notice, setNotice] = useState('');
   const [listening, setListening] = useState(false);
+  const [micTesting, setMicTesting] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
+  const [speechConsent, setSpeechConsent] = useState(false);
+  const [voicePrompt, setVoicePrompt] = useState<'speech' | 'auto' | null>(null);
+  const [autoAsk, setAutoAsk] = useState(false);
+  const autoStopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const generateLatest = useRef<(text: string) => void>(() => {});
+  const [asrStatus, setAsrStatus] = useState('正在检查百炼语音配置…');
   const [secureContext, setSecureContext] = useState(true);
   const [history, setHistory] = useState<Result[]>([]);
   const [savedScripts, setSavedScripts] = useState<{ title: string; text: string }[]>([]);
@@ -72,7 +81,7 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
   const [newUrl, setNewUrl] = useState('');
   const [newNote, setNewNote] = useState('');
   const prompter = useRef<HTMLDivElement>(null);
-  const recognition = useRef<Speech | null>(null);
+  const recognition = useRef<RealtimeSpeech | null>(null);
   const request = useRef<AbortController | null>(null);
   const sessionStart = useRef(0);
   const lastReminder = useRef(0);
@@ -84,11 +93,18 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
     const saved = loadSettings();
     if (saved) { setStudio(saved.studio); setSelected(saved.selected); setCustom(saved.custom); setWords(saved.words); setMinutes(saved.minutes); }
     try { setSavedScripts(z.array(z.object({ title: z.string().max(100), text: z.string().max(6000) })).max(20).parse(JSON.parse(localStorage.getItem('zaichang-scripts-v1') || '[]'))); } catch { /* Invalid local drafts do not prevent startup. */ }
-    const w = window as unknown as { SpeechRecognition?: new () => Speech; webkitSpeechRecognition?: new () => Speech };
     setSecureContext(window.isSecureContext);
-    setSpeechSupported(window.isSecureContext && !!(w.SpeechRecognition || w.webkitSpeechRecognition));
+    const audioSupported = window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioContext && !!window.AudioWorkletNode;
+    let disposed = false;
+    fetch('/api/asr').then(async response => {
+      if (!response.ok) throw new Error('语音配置检查失败（HTTP ' + response.status + '），请确认已部署新版并登录。');
+      const config = z.object({ configured: z.boolean(), error: z.string().optional() }).parse(await response.json());
+      if (disposed) return;
+      setSpeechSupported(audioSupported && config.configured);
+      setAsrStatus(!config.configured ? config.error || '百炼语音配置不完整。' : !audioSupported ? '当前浏览器缺少安全音频采集能力，请使用可信 HTTPS 和新版电脑浏览器。' : '百炼语音配置已填写，实际权限和额度需首次识别验证；不使用浏览器自带识别服务。');
+    }).catch(error => { if (!disposed) { setSpeechSupported(false); setAsrStatus(error instanceof Error ? error.message : '语音配置状态未知。'); } });
     fetch('/api/assist').then(r => r.json()).then(v => { const status = z.object({ configured: z.boolean(), provider: z.string().optional(), search: z.boolean().optional() }).parse(v); setConfigured(status.configured); setProvider(status.provider || "bailian"); setSearchEnabled(status.search !== false); setServiceChecked(true); }).catch(() => { setConfigured(false); setServiceChecked(true); });
-    return () => { recognition.current?.abort(); request.current?.abort(); };
+    return () => { disposed = true; cancelSpeech(); request.current?.abort(); };
   }, []);
   useEffect(() => {
     if (!running) return;
@@ -114,6 +130,7 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
     frame = requestAnimationFrame(step);
     return () => cancelAnimationFrame(frame);
   }, [scrolling, speed, focus]);
+  useEffect(() => { const hide = () => { if (document.hidden) { if (recognition.current?.waitingForPermission) { setScrolling(false); return; } if (recognition.current) setNotice('页面进入后台，识别已停止；已有文字保留，末尾可能未定稿。'); cancelSpeech(); setListening(false); setScrolling(false); } }; document.addEventListener('visibilitychange', hide); return () => document.removeEventListener('visibilitychange', hide); }, []);
   useEffect(() => { const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { setFocus(false); setCheckOpen(false); setScrolling(false); } }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key); }, []);
   useEffect(() => { setScrolling(false); if (prompter.current) prompter.current.scrollTop = restorePosition.current ?? 0; restorePosition.current = null; }, [script, reading, tab]);
   useEffect(() => { if (!running) setChecklist(checkItems.map(() => false)); }, [running]);
@@ -137,19 +154,20 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
     try { localStorage.setItem(storageKey, JSON.stringify(next || { studio, selected, custom, words, minutes })); setNotice('设置已保存到当前浏览器。不会上传密钥、录音或聊天历史。'); } catch { setNotice('浏览器未允许保存设置；当前页面仍可使用，刷新后可能丢失。'); }
   }
   function togglePlatform(id: string) { if (busy) return; setSelected(ids => ids.includes(id) ? (ids.length > 1 ? ids.filter(v => v !== id) : ids) : [...ids, id]); }
-  function showAnswer(r: Result, index = 0) { if (reading) readingDraft.current = { title: scriptLabel, text: script, position: prompter.current?.scrollTop || 0 }; setReading(false); setResult(r); setActiveAnswer(index); setScript(r.answers[index].text); setScriptLabel(r.answers[index].title); setDraftKind('answer'); }
-  async function generate() {
-    if (!question.trim()) { setNotice('先输入问题，或点击一条常见问题。'); return; }
+  function showAnswer(r: Result, index = 0) { if (reading) readingDraft.current = { title: scriptLabel, text: script, position: prompter.current?.scrollTop || 0 }; setReading(false); setResult(r); setActiveAnswer(index); setScript(r.answers[index].text); setScriptLabel(r.answers[index].title); setDraftKind('answer'); if (window.matchMedia('(max-width: 650px)').matches) requestAnimationFrame(() => document.querySelector('.answer-column')?.scrollIntoView({ block: 'start', behavior: 'smooth' })); }
+  async function generate(text = question) {
+    if (busy) return;
+    if (!text.trim()) { setNotice('先输入问题，或点击一条常见问题。'); return; }
     setNotice('');
     if (!online) {
-      const r = { ...offlineAnswer(question.trim(), studio), platformIds: [...selected] };
+      const r = { ...offlineAnswer(text.trim(), studio), platformIds: [...selected] };
       showAnswer(r); setHistory(h => [r, ...h].slice(0, 10)); return;
     }
     if (!consent) { setNotice('请先勾选发送确认；仅问题、所选平台和工作室资料会发送给 AI 服务。'); return; }
     setBusy(true); request.current = new AbortController();
     const timeout = setTimeout(() => request.current?.abort(), 65000);
     try {
-      const response = await fetch('/api/assist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, platforms: activePlatforms.map(p => p.name), studio }), signal: request.current.signal });
+      const response = await fetch('/api/assist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: text, platforms: activePlatforms.map(p => p.name), studio }), signal: request.current.signal });
       const r = await response.json();
       if (!response.ok) throw new Error(z.object({ error: z.string() }).parse(r).error || '暂时无法获得答案。');
       const parsed = resultSchema.parse(r);
@@ -157,18 +175,61 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
     } catch (e) { setNotice(e instanceof Error && e.name !== 'AbortError' ? e.message : '请求已取消或超时，当前读稿保留。'); }
     finally { clearTimeout(timeout); setBusy(false); }
   }
-  function speak() {
-    if (!speechSupported) { setNotice('当前环境不能开启网页语音，请使用文字或手机输入法的语音输入。'); return; }
+  generateLatest.current = text => {
+    if (!autoAsk || !configured || !online || !consent) { setNotice('自动问答条件已变更，本次未发送；请核对文字后手动生成。'); return; }
+    void generate(text);
+  };
+  useEffect(() => {
+    if (tab !== 'desk') { if (recognition.current) setNotice('已离开直播工作台，识别已停止；已有文字保留，末尾可能未定稿。'); cancelSpeech(); setListening(false); }
+  }, [tab]);
+
+  function cancelSpeech() {
+    if (autoStopTimer.current) clearTimeout(autoStopTimer.current);
+    const rec = recognition.current;
+    recognition.current = null;
+    rec?.abort();
+  }
+  function speak(approved = false) {
+    if (busy || micTesting) return;
     if (listening) { recognition.current?.stop(); return; }
-    if (!window.confirm('语音识别可能由浏览器的在线服务处理声音。请勿读出客户姓名、电话或病历。是否开启本次识别？')) return;
-    const w = window as unknown as { SpeechRecognition?: new () => Speech; webkitSpeechRecognition?: new () => Speech };
-    const API = w.SpeechRecognition || w.webkitSpeechRecognition;
-    if (!API) { setNotice('当前浏览器不支持语音识别，请直接输入问题。'); return; }
-    const rec = new API(); recognition.current = rec; rec.lang = 'zh-CN'; rec.continuous = false; rec.interimResults = false;
-    rec.onresult = e => { setQuestion(e.results[0][0].transcript.slice(0, 1500)); setNotice('已转成文字，请确认问题后再生成回答。'); };
-    rec.onerror = () => { setListening(false); setNotice('语音识别未成功，请检查麦克风权限、浏览器支持与网络，或手动输入。'); };
-    rec.onend = () => setListening(false);
-    try { rec.start(); setListening(true); } catch { setNotice('无法启动麦克风，请手动输入。'); }
+    if (!speechSupported) { setNotice(asrStatus); return; }
+    if (!autoAsk && question.length >= 1500) { setNotice('问题已达到 1500 字，请删减后再开始识别。'); return; }
+    if (!speechConsent && !approved) { setVoicePrompt('speech'); return; }
+    if (approved) setSpeechConsent(true);
+    cancelSpeech();
+    const automatic = autoAsk && configured && online && consent;
+    const prefix = automatic ? '' : question.trimEnd();
+    let finalQuestion = '';
+    let finishing = false;
+    if (automatic) setQuestion('');
+    let received = false;
+    let pending = false;
+    let limitReached = false;
+    const rec = new RealtimeSpeech({
+      status: message => { if (recognition.current === rec) { setNotice(message); if (message.includes('正在接收最后')) { finishing = true; if (autoStopTimer.current) clearTimeout(autoStopTimer.current); } } },
+      text: (text, interim) => {
+        if (recognition.current !== rec) return;
+        received = !!text; pending = interim;
+        const next = prefix + (prefix && text ? '\n' : '') + text;
+        finalQuestion = next.slice(0, 1500);
+        setQuestion(finalQuestion);
+        if (autoStopTimer.current) clearTimeout(autoStopTimer.current);
+        if (automatic && received && !interim && !finishing) {
+          autoStopTimer.current = setTimeout(() => {
+            if (recognition.current === rec) rec.stop();
+          }, 2500);
+        }
+        if (next.length >= 1500 && !limitReached) { limitReached = true; rec.stop(); }
+      },
+      end: error => {
+        if (recognition.current !== rec) return;
+        if (autoStopTimer.current) clearTimeout(autoStopTimer.current);
+        recognition.current = null; setListening(false);
+        if (automatic && !error && received && !pending && !limitReached) { generateLatest.current(finalQuestion); return; }
+        setNotice(error || (limitReached ? '已达到 1500 字上限，识别已停止，请核对截断位置。' : !received ? '识别结束，未收到文字。请检查麦克风收音。' : pending ? '识别结束，含未定稿文字，请核对后再生成。' : '识别结束，文字已保留，请核对后再生成。'));
+      }
+    });
+    recognition.current = rec; setListening(true); void rec.start();
   }
   function makeScript() { setReading(false); setScript(warmup(topic, studio, long, variant)); setVariant(v => v + 1); setScriptLabel(`暖场 · ${topic}`); setDraftKind('warmup'); setTab('desk'); setNotice('已载入内置暖场稿，可直接编辑。未调用 AI；不是无人直播或自动播放录音。'); }
   function storeScripts(next: { title: string; text: string }[]) {
@@ -206,15 +267,15 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
         <section className="page-heading"><div><div className="eyebrow">YOUR VOICE. A LITTLE MORE CONFIDENCE.</div><h1>{{ desk: '从容开口，每一刻都在场。', scripts: '备好一份稿，从容开始直播。', rules: '把边界弄清楚，说话更安心。', settings: '让助播真正了解你的工作室。' }[tab]}</h1><p>不必句句完美，先和屏幕另一端的人，好好聊一聊。</p></div><div className="session"><span className={`session-time ${running ? 'on' : ''}`}><i/>{clock}</span><button className={running ? 'button secondary' : 'button primary'} onClick={() => running ? setRunning(false) : setCheckOpen(true)}>{running ? <Square size={14}/> : <Radio size={17}/>} {running ? '结束助播' : '开始助播'}</button></div></section>
         <section className="platform-bar"><div className="platform-title"><Globe2 size={17}/>本场平台<small>可多选</small></div><div className="platform-options">{allPlatforms.map(p => <button disabled={busy} key={p.id} aria-pressed={selected.includes(p.id)} className={`platform-chip ${selected.includes(p.id) ? 'active' : ''}`} onClick={() => togglePlatform(p.id)}><span style={{ background: p.color }}>{p.short}</span>{p.name}{selected.includes(p.id) && <Check size={13}/>}</button>)}<button className="add-platform" onClick={() => setTab('rules')}><Plus size={15}/>扩展平台</button></div><span className="platform-hint">独立助播 · 不连接直播账号</span></section>
         {notice && <div className="notice" role="status"><CircleHelp size={18}/><span>{notice}</span><button aria-label="关闭提示" onClick={() => setNotice('')}><X size={16}/></button></div>}
-        {selfHosted && <div className="service-status"><strong>自部署测试版 · v5</strong><span>{!serviceChecked ? '正在检查配置…' : configured ? `${provider === 'zswing' ? 'ZSwing-Plus Responses（未联网）' : provider === 'deepseek' ? 'DeepSeek（未联网）' : '百炼（联网）'}配置已填写，首次生成后才能验证连接和额度。` : '免费内置话术可用；AI 问答等待服务端配置。'}{!secureContext && ' 当前是 HTTP 地址，网页麦克风不可用；可尝试手机输入法自带的语音输入。'}</span><button onClick={() => setTab('settings')}>查看服务说明</button></div>}
+        {selfHosted && <div className="service-status"><strong>自部署测试版 · v12</strong><span>{!serviceChecked ? '正在检查配置…' : configured ? `${provider === 'zswing' ? 'ZSwing-Plus Responses（未联网）' : provider === 'deepseek' ? 'DeepSeek（未联网）' : '百炼（联网）'}配置已填写，首次生成后才能验证连接和额度。` : '免费内置话术可用；AI 问答等待服务端配置。'}{!secureContext && ' 当前是 HTTP 地址，网页麦克风不可用；可尝试手机输入法自带的语音输入。'}</span><button onClick={() => setTab('settings')}>查看服务说明</button></div>}
 
         {tab === 'desk' && <div className="desk-grid">
           <section className="question-column">
-            <div className="panel ask-panel"><div className="panel-title"><span className="icon-square"><Mic size={18}/></span><h2>接住每一个问题</h2></div><p className="muted">读出观众的问题，或者直接输入。</p><label className="sr-only" htmlFor="question">观众的问题</label><textarea id="question" className="question-input" placeholder="比如：第一次去健身工作室，会不会跟不上？" value={question} maxLength={1500} onChange={e => setQuestion(e.target.value)} disabled={busy}/><div className="input-footer"><button disabled={!speechSupported || busy} className={`mic-button ${listening ? 'recording' : ''}`} onClick={speak}><Mic size={15}/>{listening ? '结束识别' : '点击说问题'}</button><small>{question.length}/1500</small></div>{!speechSupported && <p className="tiny">{secureContext ? '此浏览器未提供可用的语音识别，可使用文字或手机输入法语音输入。' : 'HTTP 网页无法启用麦克风。可尝试手机键盘上的语音输入，确认文字后再生成。'}</p>}
-              <label className="toggle-row"><span><Globe2 size={15}/>{searchEnabled ? "联网查证" : (provider === "zswing" ? "ZSwing-Plus AI · 未联网" : "DeepSeek AI · 未联网")} <small>{configured ? '需人工核对' : '待配置'}</small></span><input type="checkbox" checked={online} onChange={e => setOnline(e.target.checked)} disabled={!configured || busy}/></label>
+            <div className="panel ask-panel"><div className="panel-title"><span className="icon-square"><Mic size={18}/></span><h2>接住每一个问题</h2></div><p className="muted">读出观众的问题，或者直接输入。</p><label className="sr-only" htmlFor="question">观众的问题</label><textarea id="question" className="question-input" placeholder="比如：第一次去健身工作室，会不会跟不上？" value={question} maxLength={1500} onChange={e => setQuestion(e.target.value)} readOnly={listening} disabled={busy}/><div className="input-footer"><button disabled={!speechSupported || busy || micTesting} className={`mic-button ${listening ? 'recording' : ''}`} onClick={() => speak()}><Mic size={15}/>{listening ? '结束识别' : '点击说问题'}</button><small>{question.length}/1500</small></div>{listening && <p className="tiny" role="status">{autoAsk && online && consent ? '自动问答：句子定稿后 2.5 秒无新识别结果，将结束收音并生成回答。' : '实时转写中，文字可能修订。点击“结束识别”后可编辑；不会自动生成回答。'}</p>}{!speechSupported && <p className="tiny">{secureContext ? asrStatus : 'HTTP 网页无法启用麦克风。请使用可信 HTTPS 地址。'}</p>}
+              <label className="toggle-row"><span>语音自动问答</span><input aria-label="语音自动问答" type="checkbox" checked={autoAsk} disabled={!configured || busy || listening} onChange={e => { if (e.target.checked) setVoicePrompt('auto'); else setAutoAsk(false); }}/></label>{autoAsk && <p className="tiny">{online && consent ? '每次开麦是一个新问题；长停顿可能触发提交。可关闭此模式，先编辑再生成。' : '自动问答已暂停：请开启 AI 并勾选资料发送确认。'}</p>}<p className="tiny">声音发送至百炼，可能按用量计费；仅点击开始后收音。{speechConsent && <button className="text-button" onClick={() => { cancelSpeech(); setListening(false); setSpeechConsent(false); setNotice('已重置本页的语音发送授权并停止收音，下次开始会重新确认；浏览器麦克风权限不受影响。'); }}>重置语音授权</button>}</p><VoiceHelp secure={secureContext} status={asrStatus} listening={listening} onTesting={setMicTesting}/><label className="toggle-row"><span><Globe2 size={15}/>{searchEnabled ? "联网查证" : (provider === "zswing" ? "ZSwing-Plus AI · 未联网" : "DeepSeek AI · 未联网")} <small>{configured ? '需人工核对' : '待配置'}</small></span><input type="checkbox" checked={online} onChange={e => setOnline(e.target.checked)} disabled={!configured || busy}/></label>
               {online && <label className="consent"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)}/>同意将问题、平台和门店资料发送给 AI 服务；不含录音。</label>}
-              <button disabled={busy || listening} className="button primary full" onClick={generate}><Sparkles size={17}/>{busy ? '正在生成和整理…' : online ? (searchEnabled ? '联网生成 3 种答法' : 'AI 生成 3 种答法（未联网）') : '获取 3 种内置答法'}{!busy && <ArrowRight size={16}/>}</button>{busy && <button className="text-button" onClick={() => request.current?.abort()}>取消本次请求</button>}
-              <div className="quick-title">试试这些常见问题</div><div className="quick-questions">{quickQuestions.map(q => <button key={q} disabled={busy} onClick={() => setQuestion(q)}>{q}<ChevronRight size={13}/></button>)}</div>
+              <button disabled={busy || listening} className="button primary full" onClick={() => void generate()}><Sparkles size={17}/>{busy ? '正在生成和整理…' : online ? (searchEnabled ? '联网生成 3 种答法' : 'AI 生成 3 种答法') : '获取 3 种内置答法'}{!busy && <ArrowRight size={16}/>}</button>{busy && <button className="text-button" onClick={() => request.current?.abort()}>取消本次请求</button>}
+              <div className="quick-title">试试这些常见问题</div><div className="quick-questions">{quickQuestions.map(q => <button key={q} disabled={busy || listening} onClick={() => setQuestion(q)}>{q}<ChevronRight size={13}/></button>)}</div>
             </div>
             <div className="warm-card"><span className="warm-icon"><AudioLines size={19}/></span><h3>安静的时候，也有话聊</h3><p>一段自然开场，给新进来的朋友<br/>一个留下来的理由。</p><button onClick={() => { setLibraryTab('warm'); setTab('scripts'); }}>找一段暖场稿 <ArrowRight size={16}/></button><span className="warm-decoration" aria-hidden="true">“</span></div>
           </section>
@@ -224,7 +285,7 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
               <button className="text-button" onClick={() => {setLibrarySeed({title:scriptLabel,text:script});setLibraryTab('mine');setTab('scripts');}}>另存为我的口播稿</button><button className="text-button" onClick={saveScript}><BookOpen size={15}/>收藏当前稿件</button><div className="answer-caption"><ShieldCheck size={15}/><span>{draftKind === 'warmup' ? '内置暖场模板 · 未联网生成' : draftKind === 'edited' ? '已手动修改 · 原答案引用不代表为编辑内容背书' : result.mode}。不是个体训练处方。</span></div>
               {draftKind === 'answer' && result.sources.length > 0 && <details className="sources"><summary>查看参考来源（{result.sources.length}）</summary>{result.sources.map((s, i) => safeUrl(s.url) && <a key={i} href={s.url} target="_blank" rel="noreferrer">{s.title} ↗</a>)}</details>}
               <details className="edit-script"><summary>按自己的习惯调整读稿</summary><textarea aria-label="编辑当前读稿" value={script} maxLength={50000} onChange={e => { setScript(e.target.value); setScriptLabel('已手动编辑'); setDraftKind('edited'); }}/></details>
-            </div><div className="recent-strip"><Clock3 size={16}/><span>本场记录</span><small>{history.length ? `${history.length} 条 · 仅当前会话` : '还没有提问，先试着接住第一个问题'}</small></div>{history.length > 0 && <div className="history">{history.map((r, i) => <button key={i} onClick={() => { showAnswer(r); setQuestion(r.question); }}>{r.question}<ChevronRight size={14}/></button>)}</div>}
+            </div><div className="recent-strip"><Clock3 size={16}/><span>本场记录</span><small>{history.length ? `${history.length} 条 · 仅当前会话` : '还没有提问，先试着接住第一个问题'}</small></div>{history.length > 0 && <div className="history">{history.map((r, i) => <button key={i} disabled={listening} onClick={() => { showAnswer(r); setQuestion(r.question); }}>{r.question}<ChevronRight size={14}/></button>)}</div>}
           </section>
 
           <aside className="support-column"><section className="panel presence-panel"><div className="section-line"><h2><Activity size={17}/>在场状态</h2><span className="subtle-badge">定时提醒</span></div><div className="presence-visual" aria-hidden="true"><div className="presence-head"/><div className="presence-body"/><span className="frame-corner tl"/><span className="frame-corner tr"/><span className="frame-corner bl"/><span className="frame-corner br"/><div className="eye-line"/><span className="eye-note">视线靠近镜头</span></div><div className="presence-message" aria-live="polite"><strong>{reminders[reminder]}</strong><p>{running ? `每 ${minutes} 分钟轻提醒一次` : '开始助播后启用定时提醒'}</p></div><button className="text-button" onClick={() => setReminder(n => (n + 1) % reminders.length)}><RefreshCw size={13}/>换个提醒</button><div className="privacy-note">示意图 · 未开启摄像头或自动形象分析</div></section>
@@ -244,6 +305,7 @@ export default function CoachApp({ selfHosted = false }: { selfHosted?: boolean 
         <footer className="footer"><span>在场 · 给真人主播的一点底气</span><span>辅助参考，不替代平台审核与专业评估</span></footer>
       </main>
     </div>
+    {voicePrompt && <VoiceConfirm title={voicePrompt === 'speech' ? '开始语音识别' : '开启语音自动问答'} text={voicePrompt === 'speech' ? '声音将发送至阿里云百炼转文字，可能按时长计费。本应用不保存录音，每次最多 60 秒。\n请勿读出客户姓名、电话或病历。\n当前页面只确认一次；刷新或重置授权后重新确认。' : '每次开麦作为新问题，替换框内旧问题。\n句子定稿后 2.5 秒无新结果，会自动结束收音，将问题、平台和工作室资料发送给 AI 生成回答，可能产生语音和模型费用。\n长停顿可能触发提交，生成后不会自动重新开麦。'} onCancel={() => setVoicePrompt(null)} onConfirm={() => { const kind = voicePrompt; setVoicePrompt(null); if (kind === 'speech') speak(true); else { setOnline(true); setConsent(true); setAutoAsk(true); } }}/>}
     {checkOpen && <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) setCheckOpen(false); }}><section className="check-modal" role="dialog" aria-modal="true" aria-labelledby="check-title"><button className="modal-close" aria-label="关闭开播检查" onClick={() => setCheckOpen(false)}><X size={20}/></button><span className="icon-square"><CheckCheck size={24}/></span><h2 id="check-title">开播前，给自己一分钟。</h2><p className="muted">本次平台：{activePlatforms.map(p => p.name).join('、')}</p>{checkItems.map((item, i) => <label className="check-item" key={item}><input type="checkbox" checked={checklist[i]} onChange={e => setChecklist(c => c.map((v, n) => n === i ? e.target.checked : v))}/><span>{item}</span></label>)}<p className="tiny">此处仅启动助播计时，不会开启平台直播。每次重新开始都会重新计时。</p><button className="button primary full" disabled={!checklist.every(Boolean)} onClick={start}><Radio size={17}/>检查完成，开始助播</button></section></div>}
   </div>;
 }

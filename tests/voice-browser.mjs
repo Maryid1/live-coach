@@ -1,0 +1,178 @@
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+const require = createRequire(import.meta.url);
+const bin = (process.env.PATH || '').split(path.delimiter).find(p => fs.existsSync(path.join(p, '../playwright/package.json')));
+const pw = require(path.resolve(bin, '../playwright'));
+const browser = await pw.chromium.launch({ channel: 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+const page = await browser.newPage({ httpCredentials: { username: 'test', password: process.env.TEST_PASSWORD }, viewport: { width: 390, height: 844 } });
+const errors = [], uploads = [];
+page.on('pageerror', e => errors.push(e.message));
+page.on('request', r => { if (r.method() === 'POST') uploads.push(r.url()); });
+let speechDialogs = 0;
+let rejectSpeech = false;
+const confirmDialog = async () => {
+  if (!(await page.locator('dialog.voice-confirm').count())) return;
+  const modal = page.locator('dialog.voice-confirm');
+  const speech = (await modal.locator('h2').innerText()) === '开始语音识别';
+  if (speech) speechDialogs++;
+  const bounds = await modal.boundingBox();
+  const viewport = page.viewportSize();
+  assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= viewport.width);
+  const button = modal.getByRole('button', { name: speech && rejectSpeech ? '取消' : '同意并继续', exact: true });
+  const rect = await button.boundingBox();
+  assert.ok(rect.y >= 0 && rect.y + rect.height <= viewport.height);
+  await button.click();
+};
+await page.addInitScript(() => {
+  const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  window.testStreams = [];
+  navigator.mediaDevices.getUserMedia = async options => {
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    const stream = await original(options);
+    setTimeout(() => {
+      Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, 300);
+    window.testStreams.push(stream);
+    return stream;
+  };
+});
+const start = async () => { await page.getByRole('button', { name: '检查麦克风权限', exact: true }).click(); await confirmDialog(); };
+const stopped = () => page.evaluate(() => window.testStreams.every(s => s.getTracks().every(t => t.readyState === 'ended')));
+try {
+  await page.goto(process.env.TEST_BASE_URL, { waitUntil: 'networkidle' });
+  await page.locator('.voice-help summary').click();
+  await start();
+  await page.waitForFunction(() => document.querySelector('meter')?.value > 0);
+  await page.locator('.voice-help audio').waitFor({ timeout: 15000 });
+  assert.equal(await stopped(), true);
+  await page.locator('audio').evaluate(async audio => { await audio.play(); });
+  await page.waitForFunction(() => document.querySelector('audio').currentTime > 0);
+  assert.equal(await page.locator('audio').evaluate(a => a.error), null);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.screenshot({ path: 'outputs/voice-mobile.png', fullPage: true });
+  await page.getByRole('button', { name: '清除录音' }).click();
+  assert.equal(await page.locator('audio').count(), 0);
+  await start();
+  await page.waitForFunction(() => document.querySelector('meter')?.value > 0);
+  await page.getByRole('button', { name: '停止麦克风测试' }).click();
+  await page.locator('audio').waitFor();
+  assert.equal(await stopped(), true);
+  await page.locator('.voice-help summary').click();
+  assert.equal(await page.locator('audio').count(), 0);
+  await page.locator('.voice-help summary').click();
+  await start();
+  await page.waitForFunction(() => document.querySelector('meter')?.value > 0);
+  await page.evaluate(() => { Object.defineProperty(document, 'hidden', { value: true, configurable: true }); document.dispatchEvent(new Event('visibilitychange')); });
+  assert.equal(await stopped(), true);
+  assert.equal(await page.locator('audio').count(), 0);
+  assert.deepEqual(uploads, []);
+  assert.deepEqual(errors, []);
+  console.log('PASS: real Chromium fake-audio capture, live level, 8-second stop, blob playback/CSP, manual stop, clear, collapse, background cleanup, mobile overflow, no uploads. Not a physical mobile test.');
+  await page.route('**/api/asr', route => route.fulfill({ json: { configured: true, provider: 'bailian', model: 'paraformer-realtime-v2' } }));
+  let live;
+  let pcmBytes = 0;
+  let starts = 0;
+  let nonzero = false;
+  let finished = false;
+  let sentText = false;
+  await page.routeWebSocket('**/api/asr/live', socket => {
+    live = socket;
+    socket.onMessage(message => {
+      if (typeof message !== 'string') {
+        assert.equal(message.length % 2, 0);
+        assert.ok(message.length <= 3200);
+        pcmBytes += message.length;
+        nonzero ||= message.some(byte => byte !== 0);
+        if (!sentText) { sentText = true; socket.send(JSON.stringify({ type: 'text', text: '新手', interim: true })); }
+        return;
+      }
+      const command = JSON.parse(message);
+      if (command.type === 'start') { starts++; socket.send(JSON.stringify({ type: 'ready' })); }
+      if (command.type === 'finish') {
+        finished = true;
+        socket.send(JSON.stringify({ type: 'text', text: '新手如何训练？每周几次？', interim: false }));
+        socket.send(JSON.stringify({ type: 'done' }));
+      }
+    });
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByLabel('观众的问题').fill('已有问题');
+  const speak = async () => { await page.getByRole('button', { name: '点击说问题', exact: true }).click(); await confirmDialog(); };
+  await speak();
+  await page.waitForFunction(() => document.querySelector('#question').value === '已有问题\n新手');
+  assert.ok(pcmBytes > 0);
+  assert.equal(await page.getByLabel('观众的问题').getAttribute('readonly'), '');
+  live.send(JSON.stringify({ type: 'text', text: '新手如何训练？每周', interim: true }));
+  await page.waitForFunction(() => document.querySelector('#question').value === '已有问题\n新手如何训练？每周');
+  await page.screenshot({ path: 'outputs/asr-desktop.png', fullPage: true });
+  await page.waitForTimeout(1200);
+  assert.equal(nonzero, true);
+  await page.getByRole('button', { name: '结束识别', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('#question').readOnly);
+  assert.equal(finished, true);
+  assert.equal(await page.getByLabel('观众的问题').inputValue(), '已有问题\n新手如何训练？每周几次？');
+  assert.equal(await stopped(), true);
+  await page.getByLabel('观众的问题').fill('修改后的问题');
+  await speak();
+  await page.getByText(/百炼实时识别中，请说话/).waitFor();
+  live.send(JSON.stringify({ type: 'error', message: '百炼鉴权失败（401），测试错误提示。' }));
+  await page.getByText('百炼鉴权失败（401），测试错误提示。', { exact: true }).waitFor();
+  assert.equal(await stopped(), true);
+  assert.equal(await page.getByLabel('观众的问题').inputValue(), '修改后的问题');
+  await speak();
+  await page.getByText(/百炼实时识别中，请说话/).waitFor();
+  await page.evaluate(() => { Object.defineProperty(document, 'hidden', { value: true, configurable: true }); document.dispatchEvent(new Event('visibilitychange')); });
+  assert.equal(await stopped(), true);
+  assert.equal(starts, 3);
+  assert.equal(speechDialogs, 1);
+  await page.getByRole('button', { name: '重置语音授权', exact: true }).click();
+  rejectSpeech = true;
+  await speak();
+  assert.equal(speechDialogs, 2);
+  assert.equal(starts, 3);
+  assert.equal(await page.getByRole('button', { name: '重置语音授权', exact: true }).count(), 0);
+  rejectSpeech = false;
+  await page.reload({ waitUntil: 'networkidle' });
+  await speak();
+  await page.getByText(/百炼实时识别中，请说话/).waitFor();
+  assert.equal(speechDialogs, 3);
+  await page.getByRole('button', { name: '重置语音授权', exact: true }).click();
+  assert.equal(await stopped(), true);
+  assert.equal(await page.getByLabel('观众的问题').getAttribute('readonly'), null);
+  assert.deepEqual(uploads, []);
+  assert.deepEqual(errors, []);
+  let generated = [];
+  await page.route('**/api/assist', route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { configured: true, provider: 'zswing', search: false } });
+    const body = route.request().postDataJSON(); generated.push(body.question);
+    return route.fulfill({ json: { answers: ['简短', '展开', '追问'].map(title => ({ title, text: '自动生成测试回答' })), sources: [], mode: '测试', question: body.question, platformIds: ['red'] } });
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByLabel('观众的问题').fill('不应提交旧问题');
+  await page.getByLabel('语音自动问答', { exact: true }).click();
+  await confirmDialog();
+  await speak();
+  await page.getByText(/百炼实时识别中，请说话/).waitFor();
+  live.send(JSON.stringify({ type: 'text', text: '新问题', interim: false }));
+  await page.locator('.prompter').getByText('自动生成测试回答').waitFor();
+  assert.deepEqual(generated, ['新手如何训练？每周几次？']);
+  assert.equal(await stopped(), true);
+  await page.waitForTimeout(1000);
+  assert.equal(generated.length, 1);
+  await speak();
+  await page.getByText(/百炼实时识别中，请说话/).waitFor();
+  live.send(JSON.stringify({ type: 'text', text: '不应提交错误结果', interim: false }));
+  live.send(JSON.stringify({ type: 'error', message: '测试断线，禁止自动提交' }));
+  await page.getByText('测试断线，禁止自动提交', { exact: true }).waitFor();
+  await page.waitForTimeout(2800);
+  assert.equal(generated.length, 1);
+  assert.deepEqual(errors, []);
+  console.log('PASS: auto question replaces old text, waits for tail result, submits once, releases mic, does not submit on error.');
+  console.log('PASS: real AudioWorklet PCM capture with mock WebSocket results, live text revisions, tail text after stop, existing text/edit, auth error, background release, no automatic AI submit. No real provider call.');
+} finally { await browser.close(); }
+

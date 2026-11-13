@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { configuration, validateInput, assist } from './assist.mjs';
 import { createScriptsStore } from './scripts-store.mjs';
+import { asrConfiguration, attachAsr } from './asr.mjs';
 const scriptsStore = createScriptsStore(process.env.DATA_DIR);
 let activeRequests = 0;
 const user = process.env.APP_USER, password = process.env.APP_PASSWORD;
@@ -14,6 +15,10 @@ if (!user || user.includes(':') || !password || password.length < 16) {
 }
 const hash = value => createHash('sha256').update(value).digest();
 const expected = hash(`${user}:${password}`);
+const authenticate = req => {
+  const auth = req.headers.authorization || '';
+  return auth.startsWith('Basic ') && timingSafeEqual(hash(Buffer.from(auth.slice(6), 'base64').toString('utf8')), expected);
+};
 const root = await realpath(fileURLToPath(new URL('./public', import.meta.url)));
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' };
 const server = http.createServer(async (req, res) => {
@@ -21,13 +26,17 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
-  const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Basic ') || !timingSafeEqual(hash(Buffer.from(auth.slice(6), 'base64').toString('utf8')), expected)) {
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  if (!authenticate(req)) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Live Coach", charset="UTF-8"'); res.writeHead(401); res.end('Authentication required'); return;
   }
   try {
     const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    if (pathname === '/api/asr') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
+      res.end(JSON.stringify(asrConfiguration())); return;
+    }
     if (pathname === '/api/scripts') {
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       try {
@@ -87,5 +96,6 @@ const server = http.createServer(async (req, res) => {
 });
 server.requestTimeout = 15000;
 server.headersTimeout = 10000;
+const closeAsr = attachAsr(server, authenticate);
 server.listen(Number(process.env.PORT || 3000), process.env.HOST || '0.0.0.0', () => console.log('Live Coach listening'));
-for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => server.close(() => process.exit(0)));
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { closeAsr(); server.close(() => process.exit(0)); });

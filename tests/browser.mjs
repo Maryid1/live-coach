@@ -89,7 +89,7 @@ try {
     if (failGeneration) return route.fulfill({ status: 422, json: { error: '测试：没有取得搜索来源' } });
     return route.fulfill({ json: { answers: ['简短接话', '展开解释', '互动追问'].map(title => ({ title, text: '模拟联网读稿，非真实模型调用。' })), sources: [{ title: '模拟来源', url: 'https://example.org/source' }], question: '测试问题', platformIds: ['red'], mode: 'AI 模拟测试' } });
   });
-  await page.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { value: false }));
+  await page.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true }));
   await page.reload({ waitUntil: 'networkidle' });
   assert.equal(await page.getByRole('button', { name: '点击说问题', exact: true }).isDisabled(), true);
   await page.getByRole('button', { name: '口播稿库', exact: true }).click();
@@ -110,9 +110,9 @@ try {
   await page.route('**/api/assist', route => route.fulfill({ json: route.request().method() === 'GET' ? { configured: true, provider: 'deepseek', search: false } : { answers: ['简短', '解释', '追问'].map(title => ({ title, text: 'DeepSeek 模拟稿件' })), sources: [], question: '测试', platformIds: ['red'], mode: 'AI 草稿 · DeepSeek · 未联网，请人工核对' } }));
   await page.reload({ waitUntil: 'networkidle' });
   await page.getByLabel('观众的问题').fill('第一次健身怎么开始');
-  await page.locator('.toggle-row input').check();
+  await page.locator('.toggle-row input:not([aria-label])').check();
   await page.locator('.consent input').check();
-  await page.getByRole('button', { name: 'AI 生成 3 种答法（未联网）', exact: true }).click();
+  await page.getByRole('button', { name: 'AI 生成 3 种答法', exact: true }).click();
   await page.locator('.prompter').getByText('DeepSeek 模拟稿件').waitFor();
   assert.equal(await page.locator('.sources').count(), 0);
   await page.locator('.answer-caption').getByText(/DeepSeek.*未联网/).waitFor();
@@ -121,11 +121,27 @@ try {
   await page.reload({ waitUntil: 'networkidle' });
   await page.locator('.service-status').getByText(/ZSwing-Plus Responses/).waitFor();
   await page.getByLabel('观众的问题').fill('新手欢迎稿');
-  await page.locator('.toggle-row input').check();
+  await page.locator('.toggle-row input:not([aria-label])').check();
   await page.locator('.consent input').check();
-  await page.getByRole('button', { name: 'AI 生成 3 种答法（未联网）', exact: true }).click();
+  await page.getByRole('button', { name: 'AI 生成 3 种答法', exact: true }).click();
   await page.locator('.prompter').getByText('Responses 模拟稿件').waitFor();
   assert.equal(await page.locator('.sources').count(), 0);
+  assert.deepEqual(errors, []);
+  await page.locator('.voice-help summary').click();
+  await page.getByRole('button', { name: '检查麦克风权限', exact: true }).click();
+  await page.locator('.voice-help').getByText(/更换浏览器或反复授权不能解除/).waitFor();
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+    Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: async () => { throw new DOMException('Denied', 'NotAllowedError'); } } });
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.locator('.voice-help summary').click();
+  await page.addLocatorHandler(page.locator('dialog.voice-confirm'), async () => { await page.getByRole('button', { name: '同意并继续', exact: true }).click(); }, { times: 1 });
+  await page.getByRole('button', { name: '检查麦克风权限', exact: true }).click();
+  await page.locator('.voice-help').getByText(/权限未获允许/).waitFor();
+  assert.equal(await page.getByRole('button', { name: '检查麦克风权限', exact: true }).isVisible(), true);
+  assert.equal(await page.getByRole('button', { name: '点击说问题', exact: true }).isDisabled(), true);
+  await page.getByText('服务器尚未启用百炼语音识别。', { exact: false }).first().waitFor();
   assert.deepEqual(errors, []);
   console.log('PASS: desktop/mobile, favorites, question styles, warmup, scroll, focus, risk, storage, platform extension, preflight, timer, HTTP mic disabled, AI warmup/sources/errors (mock), no page errors.');
 } finally { await browser.close(); }

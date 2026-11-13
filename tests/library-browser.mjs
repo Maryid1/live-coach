@@ -15,6 +15,7 @@ try {
   await page.goto(base, { waitUntil: 'networkidle' });
   await page.getByRole('button', { name: '口播稿库', exact: true }).click();
   await page.locator('input[type=file]').setInputFiles({ name: '试播稿.txt', mimeType: 'text/plain', buffer: Buffer.from(text) });
+  await page.waitForFunction(expected => document.querySelector('textarea.library-editor')?.value === expected, text);
   assert.equal(await page.getByLabel('稿件正文', { exact: true }).inputValue(), text);
   await page.getByRole('button', { name: '保存到服务器', exact: true }).click();
   await page.getByRole('heading', { name: '试播稿', exact: true }).waitFor();
